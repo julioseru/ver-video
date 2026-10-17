@@ -16,6 +16,33 @@ leer niveles e indicadores en pantalla y separar lo que se **ve** de lo que se *
 | **Mirar de cerca** | `zoom`: fotogramas a resolución completa en cualquier instante. |
 | **Segunda opinión** | `gemini` (opcional): envía el video a Gemini, que procesa video y audio de forma nativa. |
 
+### Por qué es distinto a otras herramientas
+
+La mayoría de herramientas que "le dan video" a un modelo hacen una de dos cosas:
+leer solo la transcripción, o extraer fotogramas cada N segundos o en los cortes de
+escena. Ambas fallan justo en los videos que más interesan para aprender trading,
+donde la cámara no se mueve y la información está en detalles pequeños.
+
+| | Transcripción sola | Fotogramas fijos / por escena | **ver-video** |
+|---|---|---|---|
+| Ve lo que se dibuja en el gráfico | No | Solo si coincide con el muestreo | **Sí: detecta cambios por zonas** (una línea de 4 px, una etiqueta de precio) |
+| Desperdicia imágenes cuando no pasa nada | — | Sí (o se salta cosas si el intervalo es largo) | **No: fotos de control solo cada ≤5 s** |
+| Sabe *cuándo* aparece cada cosa | No | Aproximado | **Sí: hora exacta, con décimas** |
+| Une lo que se ve con lo que se dice | No | Por separado | **Sí: `timeline.md` alinea cada hoja con su tramo de audio** |
+| Lee números pequeños en pantalla | No | Con la resolución de la hoja | **Sí: `zoom` a resolución completa** |
+| Funciona sin subtítulos y sin enviar audio a terceros | Depende | Depende | **Sí: Whisper local, en GPU si la hay** |
+| Instalación en Windows | Manual | Manual | **Un doble clic** |
+| Verificado | — | — | **Prueba automática + CI en cada cambio** |
+
+La clave técnica es la detección **por zonas**: la imagen se divide en 144 zonas y
+basta con que cambie el 4 % de una de ellas (una línea de tendencia, un nivel, un
+texto) para guardar ese instante, aunque el resto de la pantalla siga igual. Una
+detección de escenas global no lo ve, porque ese cambio es menos del 1 % de la imagen.
+
+¿Cuándo usar otra cosa? Si solo necesitas un resumen de lo que se *dice*, basta con
+la transcripción. Si quieres que un modelo procese el video de forma nativa,
+`ver-video gemini` te da esa segunda opinión.
+
 ### Qué no hace
 
 Claude no percibe video continuo: ve fotogramas. El muestreo adaptativo hace que
@@ -138,4 +165,5 @@ ejecuta en cada cambio.
 
 ## Licencia
 
-MIT
+[MIT](LICENSE): libre para descargar, usar, modificar y redistribuir, también con fines comerciales.
+Contribuciones bienvenidas: abre un *issue* o un *pull request*.
