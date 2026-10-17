@@ -1,0 +1,7 @@
+{
+  "name": "ver-video",
+  "version": "0.1.0",
+  "description": "Ver, escuchar y analizar videos: hojas de fotogramas con hora, transcripción con Whisper local, cortes de escena y zoom.",
+  "author": { "name": "Julio" },
+  "license": "MIT"
+}

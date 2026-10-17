@@ -1,0 +1,11 @@
+{
+  "name": "ver-video",
+  "owner": { "name": "Julio" },
+  "plugins": [
+    {
+      "name": "ver-video",
+      "source": "./",
+      "description": "Ver, escuchar y analizar videos de YouTube o archivos locales."
+    }
+  ]
+}
