@@ -229,11 +229,11 @@ def transcribe(video: Path, out: Path, start: float, end: float, lang: str,
         return [], "ninguna"
 
     subs = sorted(out.glob("video.*.vtt"))
-    if mode in ("auto", "subs") and subs:
+    if subs:
         # Prioriza el idioma pedido y subtítulos manuales sobre automáticos.
         subs.sort(key=lambda p: (0 if f".{lang}" in p.name else 1, len(p.name)))
         segs = [s for s in parse_vtt(subs[0]) if s["end"] >= start and s["start"] <= end]
-        if segs and mode == "subs":
+        if segs and mode in ("auto", "subs") and mode == "subs":
             return segs, f"subtítulos ({subs[0].name})"
         subs_fallback = (segs, f"subtítulos ({subs[0].name})")
     else:
@@ -260,20 +260,41 @@ def transcribe(video: Path, out: Path, start: float, end: float, lang: str,
         log("El video no tiene pista de audio.")
         return subs_fallback
 
-    device = os.environ.get("VER_VIDEO_DEVICE", "auto")
-    log(f"Transcribiendo con Whisper '{model_name}' (la primera vez descarga el modelo)...")
-    try:
+    # Decodificamos el WAV nosotros (16 kHz mono PCM) para no depender de PyAV,
+    # cuyas versiones nuevas rompen la decodificación interna de faster-whisper.
+    import wave
+    import numpy as np
+    with wave.open(str(wav), "rb") as wf:
+        pcm = wf.readframes(wf.getnframes())
+    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+
+    def _run(device: str) -> tuple[list[dict], str]:
         model = WhisperModel(model_name, device=device,
-                             compute_type="int8" if device in ("auto", "cpu") else "float16")
-        seg_iter, info = model.transcribe(str(wav), language=None if lang == "auto" else lang,
+                             compute_type="float16" if device == "cuda" else "int8")
+        seg_iter, info = model.transcribe(audio, language=None if lang == "auto" else lang,
                                           vad_filter=True, beam_size=5)
-        segs = []
-        for s in seg_iter:
-            segs.append({"start": start + s.start, "end": start + s.end, "text": s.text.strip()})
-        return segs, f"Whisper {model_name} (idioma detectado: {info.language})"
-    except Exception as exc:  # noqa: BLE001
-        log(f"Whisper falló ({exc}).")
-        return subs_fallback
+        segs = [{"start": start + s.start, "end": start + s.end, "text": s.text.strip()}
+                for s in seg_iter]  # la transcripción es perezosa: se ejecuta aquí
+        return segs, f"Whisper {model_name} en {device} (idioma detectado: {info.language})"
+
+    wanted = os.environ.get("VER_VIDEO_DEVICE", "auto")
+    devices = [wanted] if wanted in ("cpu", "cuda") else ["auto", "cpu"]
+    log(f"Transcribiendo con Whisper '{model_name}' (la primera vez descarga el modelo)...")
+    last_exc: Exception | None = None
+    for dev in devices:
+        try:
+            return _run(dev)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if os.environ.get("VER_VIDEO_DEBUG"):
+                import traceback
+                traceback.print_exc()
+            if dev != devices[-1]:
+                log(f"Whisper en '{dev}' falló ({exc}). Reintento en CPU...")
+    log(f"Whisper falló ({last_exc}).")
+    if subs_fallback[0]:
+        log("Uso los subtítulos del sitio en su lugar.")
+    return subs_fallback
 
 
 # ----------------------------------------------------------------- línea de tiempo

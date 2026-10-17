@@ -7,12 +7,12 @@ allowed-tools: Bash, Read
 # ver-video
 
 `SKILL_DIR` es la carpeta que contiene este archivo. El script está en
-`SKILL_DIR/scripts/vervideo.py`. En Windows usa `python`; en macOS/Linux `python3`.
+`SKILL_DIR/scripts/vervideo.py`. En Windows usa `py -3.12` (Whisper no es compatible aún con Python 3.14); en macOS/Linux `python3`.
 
 ## 1. Verificar (solo la primera vez en la sesión)
 
 ```bash
-python "SKILL_DIR/scripts/vervideo.py" check
+py -3.12 "SKILL_DIR/scripts/vervideo.py" check
 ```
 
 Si `listo_para_watch` es false, dile al usuario que ejecute `install.ps1`
@@ -22,7 +22,7 @@ con permisos de administrador sin preguntar.
 ## 2. Procesar el video
 
 ```bash
-python "SKILL_DIR/scripts/vervideo.py" watch "<URL o ruta>"
+py -3.12 "SKILL_DIR/scripts/vervideo.py" watch "<URL o ruta>"
 ```
 
 Opciones útiles:
@@ -48,7 +48,7 @@ El comando imprime un JSON con la ruta de `timeline.md` y la carpeta de salida.
    un indicador, parámetros), haz zoom a resolución completa:
 
 ```bash
-python "SKILL_DIR/scripts/vervideo.py" zoom "<carpeta de salida>" --at 14:32 --count 3 --step 1
+py -3.12 "SKILL_DIR/scripts/vervideo.py" zoom "<carpeta de salida>" --at 14:32 --count 3 --step 1
 ```
 
    y abre las imágenes que devuelve.
@@ -71,7 +71,7 @@ procesa video y audio de forma nativa. Avisa antes al usuario: el video se
 envía a Google (los locales se suben y se borran al terminar).
 
 ```bash
-python "SKILL_DIR/scripts/vervideo.py" gemini "<URL o ruta>" --prompt "pregunta concreta"
+py -3.12 "SKILL_DIR/scripts/vervideo.py" gemini "<URL o ruta>" --prompt "pregunta concreta"
 ```
 
 Contrasta su respuesta con tus propias hojas; no la copies sin verificar.

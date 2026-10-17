@@ -28,9 +28,14 @@ movimiento rápido puede perderse si no bajas el intervalo. Videos de más de
 
 **Windows** — en PowerShell, dentro de la carpeta del repositorio:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
+Doble clic en **`instalar_todo.bat`** (instala Python, ffmpeg, paquetes y copia
+la skill a `%USERPROFILE%\.claude\skills\ver-video`; deja el registro en
+`install_log.txt`). Alternativa: `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
+
+Notas de Windows:
+- Usa **Python 3.12** (`py -3.12`): Whisper aún no funciona con Python 3.14.
+- Si tienes GPU NVIDIA sin CUDA instalado, Whisper pasa solo a CPU.
+- Instala Deno (`winget install DenoLand.Deno`) para que yt-dlp funcione bien con YouTube.
 
 Instala Python y ffmpeg con winget si faltan, y luego `yt-dlp`, `pillow` y `faster-whisper`.
 
