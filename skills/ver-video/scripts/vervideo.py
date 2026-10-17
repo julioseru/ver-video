@@ -3,11 +3,12 @@
 ver-video: convierte un video (URL de YouTube u otro sitio, o archivo local) en
 evidencia que Claude puede "ver" y "oír":
 
-  - Fotogramas densos (por defecto 1 cada 2 s) agrupados en hojas 3x3 con la
-    hora impresa en cada recuadro (storyboard).
+  - Fotogramas por muestreo adaptativo: analiza el video 4 veces por segundo y
+    guarda uno cada vez que la imagen cambia (incluidas líneas o textos pequeños),
+    más uno de control cada <=5 s. Se agrupan en hojas 3x3 con la hora de cada uno.
   - Detección de cambios de escena.
-  - Transcripción del audio con Whisper local (faster-whisper) o, si no está
-    disponible, con los subtítulos del sitio.
+  - Transcripción del audio con Whisper local (faster-whisper; GPU NVIDIA si la
+    hay) o, si no está disponible, con los subtítulos del sitio.
   - Una línea de tiempo (timeline.md) que une cada hoja con lo que se dice en
     ese tramo.
 
@@ -43,6 +44,13 @@ def fmt_ts(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def fmt_label(sec: float) -> str:
+    """Hora para las etiquetas de las hojas; añade décimas si no cae en segundo exacto."""
+    base = fmt_ts(sec)
+    frac = sec - math.floor(sec + 1e-6)
+    return base if frac < 0.05 else f"{base}.{int(frac * 10)}"
+
+
 def parse_ts(value: str | None) -> float | None:
     if value is None or value == "":
         return None
@@ -61,7 +69,7 @@ def run(cmd: list[str], capture: bool = True) -> subprocess.CompletedProcess:
 def need(binary: str) -> str:
     path = shutil.which(binary)
     if not path:
-        sys.exit(f"Falta '{binary}'. Ejecuta el instalador (install.ps1 / install.sh).")
+        sys.exit(f"Falta '{binary}'. Ejecuta el instalador (instalar_todo.bat en Windows, install.sh en macOS/Linux).")
     return path
 
 
@@ -83,6 +91,56 @@ def default_out(source: str) -> Path:
     else:
         name = Path(source).stem
     return base / re.sub(r"[^\w.-]+", "_", name)
+
+
+# ----------------------------------------------------------------- CUDA
+
+
+def setup_cuda_dlls() -> list[str]:
+    """Hace visibles para ctranslate2 las DLL de CUDA instaladas con pip
+    (nvidia-cublas-cu12, nvidia-cudnn-cu12). En Linux no hace falta."""
+    found = []
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia")
+    except (ImportError, ValueError):
+        spec = None
+    if not spec or not spec.submodule_search_locations:
+        return found
+    for base in spec.submodule_search_locations:
+        for sub in ("cublas", "cudnn", "cuda_runtime", "cuda_nvrtc"):
+            for d in (Path(base) / sub / "bin", Path(base) / sub / "lib"):
+                if d.is_dir():
+                    found.append(str(d))
+                    os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+                    if hasattr(os, "add_dll_directory"):
+                        try:
+                            os.add_dll_directory(str(d))
+                        except OSError:
+                            pass
+    return found
+
+
+def cuda_status() -> dict:
+    """Comprueba si Whisper puede usar la GPU de verdad (carga cuBLAS)."""
+    info = {"gpu_nvidia": bool(shutil.which("nvidia-smi")), "dlls_pip": bool(setup_cuda_dlls())}
+    try:
+        import ctranslate2  # type: ignore
+        info["cuda_devices"] = ctranslate2.get_cuda_device_count()
+    except Exception as exc:  # noqa: BLE001
+        info["cuda_devices"] = 0
+        info["error"] = str(exc)
+    if shutil.which("nvidia-smi"):
+        r = run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"])
+        info["gpu"] = r.stdout.strip()
+    return info
+
+
+def default_whisper_model(device_ok: bool) -> str:
+    env = os.environ.get("VER_VIDEO_WHISPER")
+    if env:
+        return env
+    return "large-v3-turbo" if device_ok else "small"
 
 
 # ----------------------------------------------------------------- descarga
@@ -125,6 +183,146 @@ def probe_duration(video: Path) -> float:
         return float(res.stdout.strip())
     except ValueError:
         sys.exit(f"No se pudo leer la duración de {video}")
+
+
+def probe_size(video: Path) -> tuple[int, int]:
+    res = run([need("ffprobe"), "-v", "error", "-select_streams", "v:0",
+               "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(video)])
+    try:
+        w, h = (int(x) for x in res.stdout.strip().splitlines()[0].split("x")[:2])
+        return w, h
+    except (ValueError, IndexError):
+        sys.exit(f"No se pudo leer la resolución de {video}")
+
+
+def extract_frames_smart(video: Path, out: Path, start: float, end: float, width: int,
+                         sample_fps: float, sensitivity: float, max_gap: float,
+                         min_gap: float, max_frames: int) -> tuple[list[tuple[float, Path]], list[dict]]:
+    """Muestreo adaptativo en dos pasadas.
+
+    1) Decodifica a `sample_fps` y guarda una miniatura gris de cada instante.
+    2) Elige qué instantes conservar: cuando cambia más del `sensitivity` % de la
+       imagen completa, o más del 8 % de alguna de sus 144 zonas (así se detectan textos,
+       etiquetas o líneas pequeñas que aparecen), o cuando pasan `max_gap` s sin
+       fotograma (control). Entre fotos hay al menos `min_gap` s, salvo cambios
+       grandes (cortes, destellos). Si se supera `max_frames`, endurece el
+       criterio de forma pareja en lugar de recortar un tramo.
+    3) Segunda pasada: guarda a color solo los instantes elegidos.
+    """
+    import numpy as np
+    from PIL import Image
+
+    fdir = out / "frames"
+    if fdir.exists():
+        shutil.rmtree(fdir)
+    fdir.mkdir(parents=True)
+
+    src_w, src_h = probe_size(video)
+    w = min(width, src_w)
+    w -= w % 2
+    h = int(round(src_h * w / src_w))
+    h -= h % 2
+    frame_bytes = w * h * 3
+    step = 1.0 / sample_fps
+    cmd = [need("ffmpeg"), "-hide_banner", "-loglevel", "error",
+           "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(video),
+           "-vf", f"fps={sample_fps},scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+
+    def stream():
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        assert proc.stdout is not None
+        try:
+            while True:
+                buf = proc.stdout.read(frame_bytes)
+                if len(buf) < frame_bytes:
+                    break
+                yield np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3)
+        finally:
+            proc.stdout.close()
+            proc.wait()
+
+    # --- pasada 1: miniaturas en gris
+    log(f"Analizando cambios visuales a {sample_fps:g} fps ({fmt_ts(start)}–{fmt_ts(end)})...")
+    # Resolución completa del análisis mientras quepa en ~600 MB de memoria; así se
+    # detectan líneas de 1-2 px (líneas de tendencia, niveles). En videos muy largos
+    # se reduce 2x2 tomando el píxel más distinto del fondo (no el promedio), para no
+    # diluir las líneas finas.
+    n_est = int((end - start) * sample_fps) + 1
+    pool = 2 if n_est * w * h > 600_000_000 else 1
+    hh, ww = h - h % pool, w - w % pool
+
+    def thumb(rgb: np.ndarray) -> np.ndarray:
+        g = rgb[:hh, :ww].mean(axis=2)
+        if pool == 1:
+            return g.astype(np.uint8)
+        blocks = g.reshape(hh // 2, 2, ww // 2, 2)
+        med = np.median(blocks, axis=(1, 3), keepdims=True)
+        idx = np.abs(blocks - med).reshape(hh // 2, 2, ww // 2, 2)
+        # elige, en cada bloque 2x2, el valor más alejado de la mediana del bloque
+        flat = blocks.transpose(0, 2, 1, 3).reshape(hh // 2, ww // 2, 4)
+        far = idx.transpose(0, 2, 1, 3).reshape(hh // 2, ww // 2, 4).argmax(axis=2)
+        return np.take_along_axis(flat, far[..., None], axis=2)[..., 0].astype(np.uint8)
+
+    smalls = [thumb(rgb) for rgb in stream()]
+    if not smalls:
+        return [], []
+    sh, sw = smalls[0].shape
+    by, bx = 9, 16  # rejilla de zonas (144)
+    ys = np.linspace(0, sh, by + 1, dtype=int)
+    xs = np.linspace(0, sw, bx + 1, dtype=int)
+    areas = np.diff(ys)[:, None] * np.diff(xs)[None, :]
+
+    def metrics(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+        d = (np.abs(a.astype(np.int16) - b.astype(np.int16)) > 24).astype(np.float32)
+        glob = float(d.mean() * 100)
+        zones = np.add.reduceat(np.add.reduceat(d, ys[:-1], axis=0), xs[:-1], axis=1)
+        loc = float((zones / areas).max() * 100)
+        return glob, loc
+
+    def select(sens: float, local: float, gap: float):
+        kept, events = [0], []
+        last = 0
+        for i in range(1, len(smalls)):
+            dt = (i - last) * step
+            glob, loc = metrics(smalls[i], smalls[last])
+            big = glob >= 20  # corte o destello: se guarda aunque sea muy seguido
+            if (glob >= sens or loc >= local) and (dt >= gap or big):
+                kept.append(i)
+                events.append({"t": round(start + i * step, 2), "cambio": round(glob, 1),
+                               "zona": round(loc, 1)})
+                last = i
+            elif dt >= max_gap:
+                kept.append(i)
+                last = i
+        return kept, events
+
+    # 4 % de una zona (~36 px a 480 de ancho) basta para una línea fina que la cruza
+    # o una etiqueta de precio nueva; el ruido de compresión queda por debajo.
+    sens, local, gap = sensitivity, 4.0, min_gap
+    kept, events = select(sens, local, gap)
+    rounds = 0
+    while len(kept) > max_frames and rounds < 12:
+        sens, local, gap = sens * 1.5, min(local * 1.25, 95.0), gap * 1.5
+        kept, events = select(sens, local, gap)
+        rounds += 1
+    if rounds:
+        log(f"Mucho movimiento: endurecí el criterio (cambio ≥{sens:.1f} %, "
+            f"separación ≥{gap:.2f} s) para quedar en {len(kept)} fotogramas.")
+    if len(kept) > max_frames:  # último recurso: reparto uniforme
+        idx = np.linspace(0, len(kept) - 1, max_frames).round().astype(int)
+        kept = [kept[i] for i in sorted(set(idx))]
+
+    # --- pasada 2: guardar a color los elegidos
+    wanted = set(kept)
+    frames = []
+    for i, rgb in enumerate(stream()):
+        if i in wanted:
+            p = fdir / f"f_{len(frames) + 1:05d}.jpg"
+            Image.fromarray(rgb).save(p, quality=88)
+            frames.append((start + i * step, p))
+    log(f"{len(frames)} fotogramas guardados ({len(events)} por cambio visual, "
+        f"el resto de control cada ≤{max_gap:g} s).")
+    return frames, events
 
 
 def extract_frames(video: Path, out: Path, start: float, end: float,
@@ -178,20 +376,20 @@ def build_grids(frames: list[tuple[float, Path]], out: Path, cols: int, rows: in
         chunk = frames[gi:gi + per]
         imgs = [Image.open(p).convert("RGB") for _, p in chunk]
         w, h = imgs[0].size
-        pad = 4
-        sheet = Image.new("RGB", (cols * w + (cols + 1) * pad, rows * h + (rows + 1) * pad), (20, 20, 20))
+        pad, bar = 4, 30  # la hora va en una franja propia: no tapa el fotograma
+        cell_h = bar + h
+        sheet = Image.new("RGB", (cols * w + (cols + 1) * pad, rows * cell_h + (rows + 1) * pad), (20, 20, 20))
         draw = ImageDraw.Draw(sheet)
         for k, ((t, _), im) in enumerate(zip(chunk, imgs)):
             x = pad + (k % cols) * (w + pad)
-            y = pad + (k // cols) * (h + pad)
-            sheet.paste(im, (x, y))
-            label = fmt_ts(t)
+            y = pad + (k // cols) * (cell_h + pad)
+            sheet.paste(im, (x, y + bar))
+            label = fmt_label(t)
             nxt = chunk[k + 1][0] if k + 1 < len(chunk) else t + (t - chunk[k - 1][0] if k else 0)
             if any(t - 0.01 <= s < nxt for s in scene_times):
                 label += "  ✂"  # hay un corte de escena en este tramo
-            bbox = draw.textbbox((0, 0), label, font=font)
-            draw.rectangle([x, y, x + bbox[2] + 12, y + bbox[3] + 10], fill=(0, 0, 0))
-            draw.text((x + 6, y + 4), label, fill=(255, 230, 0), font=font)
+            draw.rectangle([x, y, x + w - 1, y + bar - 1], fill=(0, 0, 0))
+            draw.text((x + 6, y + 3), label, fill=(255, 230, 0), font=font)
         path = gdir / f"hoja_{gi // per + 1:03d}.jpg"
         sheet.save(path, quality=85)
         grids.append({"index": gi // per + 1, "path": str(path),
@@ -242,6 +440,7 @@ def transcribe(video: Path, out: Path, start: float, end: float, lang: str,
             log("No hay subtítulos disponibles.")
             return subs_fallback
 
+    setup_cuda_dlls()
     try:
         from faster_whisper import WhisperModel  # type: ignore
     except ImportError:
@@ -269,16 +468,26 @@ def transcribe(video: Path, out: Path, start: float, end: float, lang: str,
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
     def _run(device: str) -> tuple[list[dict], str]:
-        model = WhisperModel(model_name, device=device,
+        name = model_name
+        if device == "cpu" and name.startswith("large") and not os.environ.get("VER_VIDEO_WHISPER"):
+            name = "small"  # un modelo grande en CPU sería demasiado lento
+        model = WhisperModel(name, device=device,
                              compute_type="float16" if device == "cuda" else "int8")
         seg_iter, info = model.transcribe(audio, language=None if lang == "auto" else lang,
                                           vad_filter=True, beam_size=5)
         segs = [{"start": start + s.start, "end": start + s.end, "text": s.text.strip()}
                 for s in seg_iter]  # la transcripción es perezosa: se ejecuta aquí
-        return segs, f"Whisper {model_name} en {device} (idioma detectado: {info.language})"
+        return segs, f"Whisper {name} en {device} (idioma detectado: {info.language})"
 
     wanted = os.environ.get("VER_VIDEO_DEVICE", "auto")
-    devices = [wanted] if wanted in ("cpu", "cuda") else ["auto", "cpu"]
+    devices = [wanted] if wanted in ("cpu", "cuda") else ["cuda", "cpu"]
+    if model_name == "auto":
+        try:
+            import ctranslate2  # type: ignore
+            gpu = ctranslate2.get_cuda_device_count() > 0 and wanted != "cpu"
+        except Exception:  # noqa: BLE001
+            gpu = False
+        model_name = default_whisper_model(gpu)
     log(f"Transcribiendo con Whisper '{model_name}' (la primera vez descarga el modelo)...")
     last_exc: Exception | None = None
     for dev in devices:
@@ -312,8 +521,12 @@ def write_timeline(out: Path, meta: dict, grids: list[dict], segs: list[dict],
     lines += [
         f"- Duración total: {fmt_ts(meta['duration'])} · Tramo analizado: "
         f"{fmt_ts(meta['start'])}–{fmt_ts(meta['end'])}",
-        f"- Fotograma cada {meta['interval']:g} s · {len(grids)} hojas de "
-        f"{meta['cols']}x{meta['rows']} · {len(scenes)} cambios de escena",
+        (f"- Muestreo adaptativo: {meta['frames']} fotogramas ({meta['visual_events']} por cambio "
+         f"visual, control cada ≤{meta['max_gap']:g} s) · {len(grids)} hojas de "
+         f"{meta['cols']}x{meta['rows']} · {len(scenes)} cortes de escena"
+         if meta.get("mode") == "smart" else
+         f"- Fotograma cada {meta['interval']:g} s · {len(grids)} hojas de "
+         f"{meta['cols']}x{meta['rows']} · {len(scenes)} cortes de escena"),
         f"- Transcripción: {transcript_src}",
         f"- Video local: {meta['video']}",
         "",
@@ -329,9 +542,9 @@ def write_timeline(out: Path, meta: dict, grids: list[dict], segs: list[dict],
         lines += [f"- {fmt_ts(c['start_time'])} {c['title']}" for c in meta["chapters"]]
         lines.append("")
 
-    for g in grids:
+    for gi, g in enumerate(grids):
         t0 = g["t0"]
-        t1 = g["t1"] + meta["interval"]
+        t1 = grids[gi + 1]["t0"] if gi + 1 < len(grids) else meta["end"]
         lines.append(f"## Hoja {g['index']} · {fmt_ts(t0)}–{fmt_ts(t1)}")
         lines.append("")
         lines.append(f"Imagen: `{g['path']}`")
@@ -379,13 +592,19 @@ def cmd_watch(a: argparse.Namespace) -> None:
     span = end - start
 
     per = a.cols * a.rows
-    interval = a.interval
-    if math.ceil(span / interval) > a.max_grids * per:
-        interval = math.ceil(span / (a.max_grids * per) * 10) / 10
-        log(f"Video largo: subo el intervalo a {interval:g} s para no pasar de "
-            f"{a.max_grids} hojas. Usa --start/--end para ver un tramo con más detalle.")
-
-    frames = extract_frames(video, out, start, end, interval, a.width)
+    events: list[dict] = []
+    if a.mode == "smart":
+        interval = 1.0 / a.sample_fps
+        frames, events = extract_frames_smart(
+            video, out, start, end, a.width, a.sample_fps, a.sensitivity,
+            a.max_gap, a.min_gap, a.max_grids * per)
+    else:
+        interval = a.interval
+        if math.ceil(span / interval) > a.max_grids * per:
+            interval = math.ceil(span / (a.max_grids * per) * 10) / 10
+            log(f"Video largo: subo el intervalo a {interval:g} s para no pasar de "
+                f"{a.max_grids} hojas. Usa --start/--end para ver un tramo con más detalle.")
+        frames = extract_frames(video, out, start, end, interval, a.width)
     if not frames:
         sys.exit("No se extrajo ningún fotograma.")
     scenes = detect_scenes(video, start, end, a.scene_threshold)
@@ -396,16 +615,19 @@ def cmd_watch(a: argparse.Namespace) -> None:
         "source": a.source, "video": str(video), "title": info.get("title") or video.stem,
         "uploader": info.get("uploader"), "description": info.get("description"),
         "chapters": info.get("chapters"), "duration": duration, "start": start, "end": end,
-        "interval": interval, "cols": a.cols, "rows": a.rows,
+        "interval": interval, "cols": a.cols, "rows": a.rows, "mode": a.mode,
+        "frames": len(frames), "visual_events": len(events), "max_gap": a.max_gap,
     }
     timeline = write_timeline(out, meta, grids, segs, scenes, src)
     report = {**{k: v for k, v in meta.items() if k != "description"},
               "out_dir": str(out), "timeline": str(timeline),
               "grids": [g["path"] for g in grids], "scene_changes": scenes,
-              "transcript_source": src, "transcript_segments": len(segs)}
+              "transcript_source": src, "transcript_segments": len(segs),
+              "visual_events": events}
     (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"ok": True, "timeline": str(timeline), "out_dir": str(out),
-                      "grids": len(grids), "interval": interval,
+                      "mode": a.mode, "frames": len(frames), "visual_events": len(events),
+                      "grids": len(grids),
                       "transcript": src, "scene_changes": len(scenes)}, ensure_ascii=False))
 
 
@@ -413,10 +635,17 @@ def cmd_zoom(a: argparse.Namespace) -> None:
     need("ffmpeg")
     video = Path(a.video).expanduser()
     if video.is_dir():
+        out_dir = video
         cands = [p for p in video.glob("video.*") if p.suffix.lower() in (".mp4", ".mkv", ".webm")]
-        if not cands:
-            sys.exit("No encuentro video.* en esa carpeta.")
-        video = cands[0]
+        rep = video / "report.json"
+        if cands:
+            video = cands[0]
+        elif rep.exists():
+            video = Path(json.loads(rep.read_text(encoding="utf-8"))["video"])
+        else:
+            sys.exit("No encuentro el video en esa carpeta (ni video.* ni report.json).")
+        if not a.out:
+            a.out = str(out_dir / "zoom")
     at = parse_ts(a.at) or 0.0
     zdir = Path(a.out) if a.out else video.parent / "zoom"
     zdir.mkdir(parents=True, exist_ok=True)
@@ -483,7 +712,7 @@ def cmd_check(_: argparse.Namespace) -> None:
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
     }
-    for mod, key in (("yt_dlp", "yt-dlp"), ("PIL", "pillow"),
+    for mod, key in (("yt_dlp", "yt-dlp"), ("PIL", "pillow"), ("numpy", "numpy"),
                      ("faster_whisper", "faster-whisper"), ("google.genai", "google-genai")):
         try:
             __import__(mod)
@@ -493,6 +722,8 @@ def cmd_check(_: argparse.Namespace) -> None:
     status["gemini_key"] = bool(os.environ.get("GEMINI_API_KEY")) or \
         (Path.home() / ".config" / "ver-video" / ".env").exists()
     status["listo_para_watch"] = all(status[k] for k in ("ffmpeg", "ffprobe", "pillow"))
+    if status.get("faster-whisper"):
+        status["cuda"] = cuda_status()
     print(json.dumps(status, indent=2))
 
 
@@ -506,15 +737,26 @@ def main() -> None:
     w.add_argument("--out", help="carpeta de salida")
     w.add_argument("--start", help="inicio del tramo (MM:SS o H:MM:SS)")
     w.add_argument("--end", help="fin del tramo")
-    w.add_argument("--interval", type=float, default=2.0, help="segundos entre fotogramas (def. 2)")
+    w.add_argument("--mode", choices=["smart", "fixed"], default="smart",
+                   help="smart: guarda un fotograma cada vez que la imagen cambia (def.); "
+                        "fixed: uno cada --interval segundos")
+    w.add_argument("--sample-fps", type=float, default=4.0,
+                   help="smart: fotogramas por segundo que se analizan (def. 4 = 0.25 s)")
+    w.add_argument("--sensitivity", type=float, default=2.0,
+                   help="smart: %% de la imagen que debe cambiar para guardar (def. 2; menor = más fotos)")
+    w.add_argument("--max-gap", type=float, default=5.0,
+                   help="smart: segundos máximos sin fotograma aunque no haya cambios (def. 5)")
+    w.add_argument("--min-gap", type=float, default=0.5,
+                   help="smart: segundos mínimos entre fotogramas salvo cambios grandes (def. 0.5)")
+    w.add_argument("--interval", type=float, default=2.0, help="fixed: segundos entre fotogramas (def. 2)")
     w.add_argument("--cols", type=int, default=3)
     w.add_argument("--rows", type=int, default=3)
     w.add_argument("--width", type=int, default=480, help="ancho de cada recuadro en px")
     w.add_argument("--max-grids", type=int, default=40, help="tope de hojas (def. 40 = 360 fotogramas)")
     w.add_argument("--scene-threshold", type=float, default=0.3)
     w.add_argument("--lang", default="es", help="idioma del audio (es, en, auto)")
-    w.add_argument("--whisper-model", default=os.environ.get("VER_VIDEO_WHISPER", "small"),
-                   help="tiny, base, small, medium, large-v3")
+    w.add_argument("--whisper-model", default="auto",
+                   help="auto (large-v3-turbo con GPU, small sin GPU), tiny, base, small, medium, large-v3")
     w.add_argument("--transcript", choices=["auto", "whisper", "subs", "none"], default="auto")
     w.set_defaults(func=cmd_watch)
 

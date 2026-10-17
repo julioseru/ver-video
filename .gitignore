@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 ver-video-salidas/
+install_log.txt
+prueba_log.txt
+verify_log.txt
+.env

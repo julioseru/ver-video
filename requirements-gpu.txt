@@ -1,0 +1,4 @@
+# Soporte CUDA para Whisper (solo tarjetas NVIDIA). Requiere controlador NVIDIA reciente.
+# faster-whisper / ctranslate2 4.x usan CUDA 12 + cuDNN 9.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10

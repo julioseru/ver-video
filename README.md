@@ -1,91 +1,114 @@
 # ver-video
 
-Plugin para Claude Code que le permite a Claude **ver, escuchar y analizar videos**
-(YouTube, otros sitios o archivos locales).
+Plugin para Claude Code que permite a Claude **ver, escuchar y analizar videos**
+(YouTube, otros sitios o archivos locales), con marcas de tiempo en cada conclusión.
 
-## Qué hace (y qué no)
+Pensado para estudiar videos de trading: extraer reglas de entrada y salida,
+leer niveles e indicadores en pantalla y separar lo que se **ve** de lo que se **dice**.
 
-Claude no percibe video continuo como una persona. Este plugin le da lo más
-cercano posible:
+## Cómo funciona
 
 | Sentido | Cómo se logra |
 |---|---|
-| **Ver** | Un fotograma cada 2 s (ajustable a 0.5 s), agrupados en hojas 3×3 con la hora impresa. Claude revisa 9 momentos por imagen, en orden. |
-| **Oír** | Transcripción local con Whisper (`faster-whisper`), sin depender de subtítulos. Si Whisper no está, usa los subtítulos del sitio. |
-| **Notar cambios** | Detección de cortes de escena con ffmpeg, marcados con ✂ en las hojas. |
-| **Mirar de cerca** | `zoom`: fotogramas a resolución completa en el instante que interese (niveles, números, parámetros de un indicador). |
-| **Segunda opinión** | `gemini` (opcional): envía el video completo a Gemini, que procesa video y audio nativamente. |
+| **Ver** | Muestreo adaptativo: el video se analiza 4 veces por segundo y se guarda un fotograma cada vez que la imagen cambia, incluso si cambia una zona pequeña (un texto, una etiqueta de precio, una línea dibujada). En tramos quietos, un fotograma de control cada ≤5 s. |
+| **Oír** | Whisper local (`faster-whisper`). Con GPU NVIDIA usa `large-v3-turbo` (más preciso); sin GPU, `small` en CPU. Si no hay Whisper, usa los subtítulos del sitio. |
+| **Ordenar** | Hojas 3×3 con la hora de cada fotograma en una franja propia (no tapa la imagen), cortes de escena marcados con ✂ y `timeline.md`, que une cada hoja con lo que se dice en ese tramo. |
+| **Mirar de cerca** | `zoom`: fotogramas a resolución completa en cualquier instante. |
+| **Segunda opinión** | `gemini` (opcional): envía el video a Gemini, que procesa video y audio de forma nativa. |
 
-Todo se une en `timeline.md`: cada hoja de fotogramas junto a lo que se dice en ese tramo.
+### Qué no hace
 
-Limitaciones: entre un fotograma y otro hay huecos (2 s por defecto); el
-movimiento rápido puede perderse si no bajas el intervalo. Videos de más de
-~12 minutos suben el intervalo automáticamente; para detalle usa `--start/--end`.
+Claude no percibe video continuo: ve fotogramas. El muestreo adaptativo hace que
+no se pierda ningún cambio visual que dure más de ~0.25 s, pero el movimiento
+continuo (gestos, scroll) se resume en un fotograma cada ~0.5 s. Videos con
+mucho movimiento se acotan a 360 fotogramas por pasada; usa `--start/--end`
+para más detalle en un tramo.
 
 ## Instalación
 
-### 1. Dependencias (una vez)
+### Windows
 
-**Windows:**
+1. Descarga o clona este repositorio.
+2. Doble clic en **`instalar_todo.bat`**. Instala, sin preguntas:
+   - Python 3.12 (Whisper aún no funciona con 3.14), ffmpeg y Deno (yt-dlp lo necesita para YouTube), con `winget`.
+   - `yt-dlp`, `pillow`, `numpy` y `faster-whisper`.
+   - Si hay tarjeta NVIDIA: las librerías CUDA para Whisper (cuBLAS y cuDNN, ~1 GB).
+   - La skill en `%USERPROFILE%\.claude\skills\ver-video`.
 
-Doble clic en **`instalar_todo.bat`** (instala Python, ffmpeg, paquetes y copia
-la skill a `%USERPROFILE%\.claude\skills\ver-video`; deja el registro en
-`install_log.txt`). Alternativa: `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
+   Al final muestra una verificación y deja el registro en `install_log.txt`.
+3. Opcional: `probar.bat` hace una prueba completa con un video de YouTube y compara GPU y CPU.
 
-Notas de Windows:
-- Usa **Python 3.12** (`py -3.12`): Whisper aún no funciona con Python 3.14.
-- Si tienes GPU NVIDIA sin CUDA instalado, Whisper pasa solo a CPU.
-- Instala Deno (`winget install DenoLand.Deno`) para que yt-dlp funcione bien con YouTube.
+### macOS / Linux
 
+```bash
+./install.sh
+```
 
-**macOS / Linux:** `./install.sh`
+### Como plugin de Claude Code (opcional)
 
-La primera transcripción descarga el modelo Whisper `small` (~500 MB).
-Con tarjeta NVIDIA es mucho más rápido; en CPU, un video de 20 min tarda
-unos minutos. Cambia el modelo con `--whisper-model base` (más rápido) o
-`medium` (más preciso).
-
-### 2. Instalar el plugin en Claude
-
-**Claude Desktop (sesión Code):** Customize → Plugins → Add → Add marketplace →
-Add from a repository → pega la URL de tu repositorio en GitHub → Sync →
-instala **ver-video**.
-
-**Claude Code en terminal:**
+Si prefieres instalarlo como plugin en vez de skill personal:
 
 ```text
 /plugin marketplace add <tu-usuario>/ver-video
 /plugin install ver-video@ver-video
 ```
 
-**Sin GitHub (carpeta local):** `/plugin marketplace add C:\ruta\a\ver-video`
+En Claude Desktop: Customize → Plugins → Add → Add marketplace → Add from a repository → URL del repositorio.
 
 ## Uso
 
-En una sesión **Code**, pide en lenguaje natural:
+En una sesión **Code** de Claude, en lenguaje natural:
 
 > Mira este video y extrae las reglas de la estrategia con marcas de tiempo: https://www.youtube.com/watch?v=...
 
-> Analiza del minuto 12 al 18 de este video con un fotograma por segundo y dime qué indicadores usa y con qué parámetros.
+> Analiza del minuto 12 al 18 de este video y dime qué indicadores usa y con qué parámetros.
 
-O directamente desde la terminal:
+Desde la terminal:
 
 ```bash
-python skills/ver-video/scripts/vervideo.py watch "https://youtu.be/XXXX"
-python skills/ver-video/scripts/vervideo.py watch video.mp4 --start 12:00 --end 18:00 --interval 1
-python skills/ver-video/scripts/vervideo.py zoom ~/ver-video-salidas/XXXX --at 14:32 --count 3
-python skills/ver-video/scripts/vervideo.py gemini "https://youtu.be/XXXX" --prompt "¿Qué reglas de entrada usa?"
-python skills/ver-video/scripts/vervideo.py check
+py -3.12 skills/ver-video/scripts/vervideo.py watch "https://youtu.be/XXXX"
+py -3.12 skills/ver-video/scripts/vervideo.py watch video.mp4 --start 12:00 --end 18:00 --sensitivity 1
+py -3.12 skills/ver-video/scripts/vervideo.py zoom ~/ver-video-salidas/XXXX --at 14:32 --count 3
+py -3.12 skills/ver-video/scripts/vervideo.py gemini "https://youtu.be/XXXX" --prompt "¿Qué reglas de entrada usa?"
+py -3.12 skills/ver-video/scripts/vervideo.py check
 ```
 
-Las salidas quedan en `~/ver-video-salidas/<id>/` (cámbialo con `VER_VIDEO_HOME`).
+(En macOS/Linux usa `python3` en lugar de `py -3.12`.)
+
+Las salidas quedan en `~/ver-video-salidas/<id>/`: `timeline.md`, `grids/`,
+`transcripcion.txt` y `report.json` (incluye los instantes de cambio visual).
+Cambia la carpeta con la variable `VER_VIDEO_HOME`.
+
+### Opciones principales de `watch`
+
+| Opción | Por defecto | Qué hace |
+|---|---|---|
+| `--mode` | `smart` | `smart` (adaptativo) o `fixed` (una foto cada `--interval` s) |
+| `--sensitivity` | `2` | % de la imagen que debe cambiar; menor = más fotos |
+| `--max-gap` | `5` | segundos máximos sin fotograma en tramos quietos |
+| `--min-gap` | `0.5` | segundos mínimos entre fotos (salvo cortes/destellos) |
+| `--sample-fps` | `4` | instantes analizados por segundo |
+| `--start` / `--end` | todo | tramo a analizar (`MM:SS` o `H:MM:SS`) |
+| `--lang` | `es` | idioma del audio (`es`, `en`, `auto`) |
+| `--whisper-model` | `auto` | `large-v3-turbo` con GPU, `small` sin GPU |
+| `--transcript` | `auto` | `auto`, `whisper`, `subs`, `none` |
+
+Variables de entorno: `VER_VIDEO_DEVICE` (`cuda`/`cpu`), `VER_VIDEO_WHISPER`
+(modelo fijo), `VER_VIDEO_HOME`, `GEMINI_API_KEY`, `GEMINI_MODEL`.
+
+## GPU (CUDA)
+
+Con una tarjeta NVIDIA, Whisper transcribe de 5 a 10 veces más rápido, lo que
+permite usar el modelo grande (`large-v3-turbo`): menos errores en español y en
+jerga técnica. No hace falta instalar el CUDA Toolkit; basta el controlador
+NVIDIA y `pip install -r requirements-gpu.txt` (lo hace el instalador). Si la
+GPU falla, Whisper pasa solo a la CPU.
 
 ## Gemini (opcional)
 
 1. Clave gratuita en https://aistudio.google.com/apikey
 2. Guárdala en `~/.config/ver-video/.env` como `GEMINI_API_KEY=...`
-   (o como variable de entorno).
-3. Modelo por defecto `gemini-2.5-flash`; cámbialo con `GEMINI_MODEL`.
+3. `pip install google-genai`
 
 Los videos de YouTube se envían por URL; los locales se suben a Google y se
 borran al terminar.
@@ -93,10 +116,25 @@ borran al terminar.
 ## Estructura
 
 ```
-.claude-plugin/        manifiestos del plugin y del marketplace
-skills/ver-video/      SKILL.md (instrucciones para Claude) y scripts/vervideo.py
-install.ps1 / .sh      instaladores de dependencias
+.claude-plugin/          manifiestos del plugin y del marketplace
+skills/ver-video/        SKILL.md (instrucciones para Claude) y scripts/vervideo.py
+instalar_todo.bat/.ps1   instalador de Windows
+probar.bat/.ps1          prueba completa en tu PC (YouTube real, GPU vs CPU)
+install.sh               instalador de macOS/Linux
+requirements*.txt        dependencias (base y GPU)
+tests/smoke_test.py      prueba automática (sin red ni Whisper); la corre el CI
 ```
+
+## Pruebas
+
+```bash
+python tests/smoke_test.py
+```
+
+Genera un video sintético tipo gráfico de trading y comprueba que se detectan una
+etiqueta pequeña que aparece, una línea fina de 4 px que se dibuja y un corte de
+escena, y que el ruido de compresión no genera falsos cambios. GitHub Actions la
+ejecuta en cada cambio.
 
 ## Licencia
 

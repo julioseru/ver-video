@@ -1,7 +1,16 @@
 {
   "name": "ver-video",
-  "version": "0.1.0",
-  "description": "Ver, escuchar y analizar videos: hojas de fotogramas con hora, transcripción con Whisper local, cortes de escena y zoom.",
-  "author": { "name": "Julio" },
-  "license": "MIT"
+  "version": "0.2.0",
+  "description": "Ver, escuchar y analizar videos: muestreo adaptativo de fotogramas, transcripción con Whisper (GPU opcional), cortes de escena y zoom.",
+  "author": {
+    "name": "Julio"
+  },
+  "license": "MIT",
+  "keywords": [
+    "video",
+    "youtube",
+    "whisper",
+    "trading",
+    "transcripcion"
+  ]
 }
