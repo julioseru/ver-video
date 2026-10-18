@@ -129,9 +129,18 @@ Variables de entorno: `VER_VIDEO_DEVICE` (`cuda`/`cpu`), `VER_VIDEO_WHISPER`
 
 ## GPU (CUDA)
 
-Con una tarjeta NVIDIA, Whisper transcribe de 5 a 10 veces más rápido, lo que
-permite usar el modelo grande (`large-v3-turbo`): menos errores en español y en
-jerga técnica. No hace falta instalar el CUDA Toolkit; basta el controlador
+Con una tarjeta NVIDIA, Whisper transcribe mucho más rápido, lo que permite usar
+el modelo grande (`large-v3-turbo`): menos errores en español y en jerga técnica.
+
+Medido en un portátil con **RTX 5060 Laptop (8 GB)**, mismo audio:
+
+| Modelo | Dispositivo | Tiempo |
+|---|---|---|
+| `small` | CPU | 134,3 s |
+| `large-v3-turbo` | GPU (CUDA) | **7,5 s** (9,6 s la primera vez) |
+
+Es decir, un modelo mucho más grande y preciso, unas **18 veces más rápido**. La
+primera ejecución tarda más porque descarga el modelo y prepara CUDA. No hace falta instalar el CUDA Toolkit; basta el controlador
 NVIDIA y `pip install -r requirements-gpu.txt` (lo hace el instalador). Si la
 GPU falla, Whisper pasa solo a la CPU.
 
