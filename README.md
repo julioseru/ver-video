@@ -1,5 +1,8 @@
 # ver-video
 
+[![test](https://github.com/julioseru/ver-video/actions/workflows/test.yml/badge.svg)](https://github.com/julioseru/ver-video/actions/workflows/test.yml)
+[![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-green.svg)](LICENSE)
+
 Plugin para Claude Code que permite a Claude **ver, escuchar y analizar videos**
 (YouTube, otros sitios o archivos locales), con marcas de tiempo en cada conclusión.
 
@@ -55,7 +58,8 @@ para más detalle en un tramo.
 
 ### Windows
 
-1. Descarga o clona este repositorio.
+1. Descarga el ZIP (botón verde **Code → Download ZIP**) o clona:
+   `git clone https://github.com/julioseru/ver-video`
 2. Doble clic en **`instalar_todo.bat`**. Instala, sin preguntas:
    - Python 3.12 (Whisper aún no funciona con 3.14), ffmpeg y Deno (yt-dlp lo necesita para YouTube), con `winget`.
    - `yt-dlp`, `pillow`, `numpy` y `faster-whisper`.
@@ -76,11 +80,11 @@ para más detalle en un tramo.
 Si prefieres instalarlo como plugin en vez de skill personal:
 
 ```text
-/plugin marketplace add <tu-usuario>/ver-video
+/plugin marketplace add julioseru/ver-video
 /plugin install ver-video@ver-video
 ```
 
-En Claude Desktop: Customize → Plugins → Add → Add marketplace → Add from a repository → URL del repositorio.
+En Claude Desktop: Customize → Plugins → Add → Add marketplace → Add from a repository → `https://github.com/julioseru/ver-video`.
 
 ## Uso
 
